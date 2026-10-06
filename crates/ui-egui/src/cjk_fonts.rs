@@ -14,8 +14,8 @@
 //!
 //! Builds made with the optional craft-fonts input (`CRAFT_FONTS_DIR`,
 //! [`photocraft_text::craft_fonts`]) carry Japanese fonts (BIZ UDPGothic first): they are tried
-//! before the system Japanese fonts, in the Japanese slot of the same locale order, and are the
-//! web build's only Japanese font. Without craft-fonts nothing changes.
+//! before the system Japanese fonts, in the Japanese slot of the same locale order. Without
+//! craft-fonts (and on the web, which never embeds them) nothing changes.
 
 use egui::epaint::text::{FontInsert, FontPriority, InsertFontFamily};
 use egui::{FontData, FontFamily, FontId, Shape};
@@ -391,7 +391,7 @@ mod tests {
         }
     }
 
-    /// No system fonts at all (like the web build): craft-fonts alone draws Japanese.
+    /// No system fonts at all: craft-fonts alone draws Japanese.
     fn craft_only(locale: fn() -> Option<String>) -> Sources {
         Sources { locale, files: |_| vec![], last_resort: Vec::new, embedded: craft_embedded }
     }

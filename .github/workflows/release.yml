@@ -32,7 +32,7 @@ env:
   INPUT_VERSION: ${{ inputs.version }}
   # craft-fonts (https://github.com/storytold/craft-fonts): shared font assets every release
   # embeds (today the Japanese fonts). An optional build input for everyone else; see
-  # docs/development.md › Fonts. Bump deliberately; every app-building job checks out this commit.
+  # docs/development.md › Fonts. Bump deliberately; every desktop build job checks out this commit (not web).
   CRAFT_FONTS_REF: abb83316d96aa59c1cf64784289e378fe9fa5695
 
 jobs:
@@ -343,12 +343,6 @@ jobs:
       TRUNK_VERSION: 0.21.14
     steps:
       - uses: actions/checkout@v4
-      - name: Check out craft-fonts (embedded fonts)
-        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
-        with:
-          repository: storytold/craft-fonts
-          ref: ${{ env.CRAFT_FONTS_REF }}
-          path: craft-fonts
       - uses: dtolnay/rust-toolchain@stable
         with:
           targets: wasm32-unknown-unknown
@@ -363,11 +357,9 @@ jobs:
       - name: Apply version override
         if: inputs.version != ''
         run: cargo xtask version set "$PHOTOCRAFT_VERSION"
+      # No craft-fonts here: the wasm32 build never embeds it (crates/text/build.rs), since even
+      # one Japanese font takes the wasm over packaging/web/package.sh's 24 MiB gate.
       - name: Build and zip
-        # The web build embeds only craft-fonts' UI face (crates/text/build.rs): size cap.
-        env:
-          CRAFT_FONTS_DIR: ${{ github.workspace }}/craft-fonts
-          CRAFT_FONTS_REQUIRED: "1"
         run: packaging/web/package.sh
       - uses: actions/upload-artifact@v4
         with:

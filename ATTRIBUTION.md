@@ -29,7 +29,7 @@ from it is committed here. Per-file authors, sources and licences:
 
 | Font (embedded at build time) | Use | License |
 |---|---|---|
-| BIZ UDPGothic Regular, Bold (Morisawa) | Japanese UI and sans Type fallback (the web build embeds Regular only) | SIL OFL 1.1, shipped as `OFL-biz-ud-pgothic.txt` |
+| BIZ UDPGothic Regular, Bold (Morisawa) | Japanese UI and sans Type fallback (desktop) | SIL OFL 1.1, shipped as `OFL-biz-ud-pgothic.txt` |
 | Shippori Mincho Regular (FONTDASU) | Japanese serif Type fallback (desktop) | SIL OFL 1.1, shipped as `OFL-shippori-mincho.txt` |
 | BIZ UDMincho Regular (Morisawa) | Japanese serif Type fallback (desktop) | SIL OFL 1.1, shipped as `OFL-biz-ud-mincho.txt` |
 

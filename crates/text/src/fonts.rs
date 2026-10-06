@@ -101,8 +101,8 @@ impl FontDb {
         for (_, bytes) in BUNDLED {
             db.register_font_data(bytes.to_vec());
         }
-        // The optional craft-fonts (empty unless built with CRAFT_FONTS_DIR), before any system
-        // font: they are the web build's only Japanese fonts.
+        // The optional craft-fonts (empty unless built with CRAFT_FONTS_DIR; always empty on
+        // wasm32), before any system font.
         for f in crate::craft_fonts::CRAFT_FONTS.iter().filter(|f| f.is_japanese()) {
             db.register_static_font(f.bytes);
         }
