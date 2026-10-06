@@ -297,7 +297,9 @@ fn wait_job_blocks_until_applied() {
 /// Cancel latency on a 24 MP document (6000×4000): from `cancel_job` until the worker thread
 /// has exited. Release only: debug builds are ~20× slower per tile.
 #[test]
-#[cfg_attr(debug_assertions, ignore = "timing: run with --release")]
+// Wall-clock timing depends on machine load (the release corpus job runs every test), so it is
+// opt-in; perf_scenarios tracks the same numbers as P25/P49.
+#[ignore = "timing: cargo test --release -p photocraft-engine --lib cancel_takes -- --ignored"]
 fn cancel_takes_effect_within_200_ms_on_24_mp() {
     for (cmd, params, select) in [("filter.blur.gaussianBlur", json!({"radius": 50}), false), ("edit.contentAwareFill", json!({}), true)] {
         let mut s = session(6000, 4000);
