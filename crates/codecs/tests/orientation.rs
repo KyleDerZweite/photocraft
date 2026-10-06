@@ -114,19 +114,19 @@ fn exact_scene(w: usize, h: usize) -> Vec<u8> {
 fn reads_orientation_in_every_encoding() {
     for o in 1..=8 {
         for big in [false, true] {
-            let e = exif(o, big, false);
-            assert_eq!(exif_orientation(&e), o as u16, "o={o} big={big}");
-            let mut prefixed = b"Exif\0\0".to_vec();
-            prefixed.extend_from_slice(&e);
-            assert_eq!(exif_orientation(&prefixed), o as u16);
-            let fixed = upright_exif(&prefixed);
-            assert_eq!(exif_orientation(&fixed), 1);
-            assert_eq!(fixed.len(), prefixed.len(), "rewritten in place");
-            assert_eq!(&fixed[..6], b"Exif\0\0");
-            // The tag must be a SHORT: a LONG orientation is ignored (and left alone).
-            let long = exif(o, big, true);
-            assert_eq!(exif_orientation(&long), 1, "o={o} big={big} LONG");
-            assert!(matches!(upright_exif(&long), std::borrow::Cow::Borrowed(_)));
+            for long in [false, true] {
+                let e = exif(o, big, long);
+                assert_eq!(exif_orientation(&e), o as u16, "o={o} big={big} long={long}");
+                let mut prefixed = b"Exif\0\0".to_vec();
+                prefixed.extend_from_slice(&e);
+                assert_eq!(exif_orientation(&prefixed), o as u16);
+                let fixed = upright_exif(&prefixed);
+                assert_eq!(exif_orientation(&fixed), 1);
+                assert_eq!(fixed.len(), prefixed.len(), "rewritten in place");
+                assert_eq!(&fixed[..6], b"Exif\0\0");
+                // Rewritten in the entry's own type and width: exactly `exif(1, ..)`.
+                assert_eq!(&fixed[6..], &exif(1, big, long)[..], "o={o} big={big} long={long}");
+            }
         }
     }
     // Already upright, no tag, or garbage: borrowed unchanged.
@@ -262,7 +262,7 @@ fn jpeg_opens_upright_for_every_orientation() {
     for o in 1..=8u16 {
         let (s, sw, sh) = stored(&up, w, h, o);
         let jpeg = encode(&gray(sw, sh, s), Format::Jpeg, &EncodeOptions { jpeg_quality: 100, ..Default::default() }).unwrap();
-        let file = jpeg_with_exif(&jpeg, &exif(u32::from(o), o > 4, false));
+        let file = jpeg_with_exif(&jpeg, &exif(u32::from(o), o > 4, o == 7));
         let img = decode(&file).unwrap();
         assert_blocks(&img, &up, w, h, &format!("o={o}"));
         assert_eq!(exif_orientation(img.meta.exif.as_deref().unwrap()), 1);
@@ -426,8 +426,12 @@ fn duplicate_orientation_entries_first_wins() {
         // A malformed first entry is ignored as a whole: a later good one does not count.
         let bad_first = ifd(big, &[(0x0112, 3, 2, short(6, big)), o(8)], &[]);
         assert_eq!(exif_orientation(&bad_first), 1);
-        let long_first = ifd(big, &[(0x0112, 4, 1, if big { 6u32.to_be_bytes() } else { 6u32.to_le_bytes() }), o(8)], &[]);
-        assert_eq!(exif_orientation(&long_first), 1);
+        let long = |v: u32| (0x0112, 4, 1, if big { v.to_be_bytes() } else { v.to_le_bytes() });
+        let long_first = ifd(big, &[long(6), o(8)], &[]);
+        assert_eq!(exif_orientation(&long_first), 6, "a LONG first entry counts");
+        assert_eq!(&upright_exif(&long_first)[..], &ifd(big, &[long(1), o(1)], &[])[..], "each in its own width");
+        let rational_first = ifd(big, &[(0x0112, 5, 1, short(6, big)), o(8)], &[]);
+        assert_eq!(exif_orientation(&rational_first), 1);
         // Upright: every well-formed duplicate becomes 1, so no reader rotates twice.
         let dup = ifd(big, &[o(6), o(3)], &[]);
         let fixed = upright_exif(&dup);
@@ -456,11 +460,13 @@ fn strict_ifd_parsing_ignores_the_tag() {
             assert_eq!(exif_orientation(&b), 1, "offset {off}");
             assert!(matches!(upright_exif(&b), std::borrow::Cow::Borrowed(_)));
         }
-        // Count must be exactly 1, type must be SHORT.
+        // Count must be exactly 1, type must be SHORT or LONG.
+        let long6 = if big { 6u32.to_be_bytes() } else { 6u32.to_le_bytes() };
         for count in [0, 2, 3, u32::MAX] {
             assert_eq!(exif_orientation(&ifd(big, &[(0x0112, 3, count, short(6, big))], &[])), 1, "count {count}");
+            assert_eq!(exif_orientation(&ifd(big, &[(0x0112, 4, count, long6)], &[])), 1, "LONG count {count}");
         }
-        for ty in [1, 2, 4, 5, 7, 8, 9, 0, 0xFFFF] {
+        for ty in [1, 2, 5, 6, 7, 8, 9, 0, 0xFFFF] {
             let b = ifd(big, &[(0x0112, ty, 1, short(6, big))], &[]);
             assert_eq!(exif_orientation(&b), 1, "type {ty}");
             assert!(matches!(upright_exif(&b), std::borrow::Cow::Borrowed(_)), "type {ty}");
@@ -520,4 +526,31 @@ fn limits_apply_to_the_upright_size() {
     let tiff = tiff_with_orientation(&[7; 32 * 16], 32, 16, 8);
     assert!(matches!(decode_with(&tiff, &opts), Err(CodecError::LimitExceeded(_))));
     assert_eq!(decode_with(&tiff, &DecodeOptions::default()).unwrap().dimensions(), (16, 32));
+}
+
+#[test]
+fn long_orientation_reads_and_rewrites_in_both_byte_orders() {
+    for big in [false, true] {
+        let u32b = |v: u32| if big { v.to_be_bytes() } else { v.to_le_bytes() };
+        let long = |v: u32| (0x0112u16, 4u16, 1u32, u32b(v));
+        for o in 1..=8u32 {
+            let e = ifd(big, &[(0x0131, 2, 4, *b"PC1\0"), long(o)], b"tail");
+            assert_eq!(exif_orientation(&e), o as u16, "o={o} big={big}");
+            let fixed = upright_exif(&e);
+            assert_eq!(exif_orientation(&fixed), 1);
+            // Still a LONG, all 4 value bytes set to 1 in the file's byte order; nothing else moved.
+            assert_eq!(&fixed[..], &ifd(big, &[(0x0131, 2, 4, *b"PC1\0"), long(1)], b"tail")[..], "o={o} big={big}");
+        }
+        // Out of range, including values that only fit in a LONG, reads as 1 and is left alone.
+        for bad in [0, 9, 0x1_0006, u32::MAX] {
+            let e = ifd(big, &[long(bad)], &[]);
+            assert_eq!(exif_orientation(&e), 1, "{bad}");
+        }
+        // A LONG 6 in a JPEG opens upright.
+        let jpeg = encode(&gray(32, 16, vec![90; 32 * 16]), Format::Jpeg, &EncodeOptions::default()).unwrap();
+        let img = decode(&jpeg_with_exif(&jpeg, &ifd(big, &[long(6)], &[]))).unwrap();
+        assert_eq!(img.dimensions(), (16, 32));
+        let kept = img.meta.exif.as_deref().unwrap();
+        assert_eq!(kept.strip_prefix(b"Exif\0\0").unwrap_or(kept), &ifd(big, &[long(1)], &[])[..]);
+    }
 }

@@ -11,7 +11,8 @@
 //! clockwise turn, 7 = transverse, 8 = needs a 90° counter-clockwise turn.
 //! Anything malformed, truncated or out of range reads as 1: an IFD0 that
 //! starts inside the 8-byte header or is cut off before its next-IFD pointer,
-//! or an Orientation entry that is not exactly one SHORT. When IFD0 holds
+//! or an Orientation entry that is not exactly one SHORT or LONG (the spec says
+//! SHORT, but some cameras and tools write LONG). When IFD0 holds
 //! several Orientation entries the first one wins (like libexif).
 
 use std::borrow::Cow;
@@ -21,8 +22,10 @@ use crate::image::Image;
 
 /// The TIFF/EXIF Orientation tag.
 const TAG_ORIENTATION: u16 = 274;
-/// The only field type the Orientation tag may have (TIFF 6.0, EXIF 2.3).
+/// Field types accepted for the Orientation tag: SHORT (the spec) and LONG
+/// (written by some cameras and tools).
 const TYPE_SHORT: u16 = 3;
+const TYPE_LONG: u16 = 4;
 /// Bytes per IFD entry.
 const ENTRY: usize = 12;
 /// The TIFF header is 8 bytes, so no IFD can start before it.
@@ -83,27 +86,52 @@ fn ifd0_entries(b: &[u8]) -> Option<(Order, impl Iterator<Item = usize>)> {
     Some((order, (0..count).map(move |i| first + i * ENTRY)))
 }
 
-/// Whether the entry at `e` is a well-formed Orientation entry: one SHORT.
-fn is_orientation(order: Order, b: &[u8], e: usize) -> bool {
-    let field = |off: usize| e.checked_add(off);
-    order.u16(b, e) == Some(TAG_ORIENTATION)
-        && field(2).and_then(|at| order.u16(b, at)) == Some(TYPE_SHORT)
-        && field(4).and_then(|at| order.u32(b, at)) == Some(1)
+/// A well-formed Orientation entry's value: where it sits and its field type.
+#[derive(Clone, Copy)]
+struct Value {
+    at: usize,
+    ty: u16,
 }
 
-/// Locates the Orientation entry in IFD0: `(byte order, value offset)`.
-///
-/// The **first** Orientation entry wins (like libexif and Photoshop); if that
-/// one is malformed (count ≠ 1 or not a SHORT) the tag is ignored, even when a
-/// later duplicate is well formed.
-fn find_entry(b: &[u8]) -> Option<(Order, usize)> {
-    let (order, mut entries) = ifd0_entries(b)?;
-    let e = entries.find(|&e| order.u16(b, e) == Some(TAG_ORIENTATION))?;
-    // One SHORT sits left-justified in the 4-byte value field.
-    if !is_orientation(order, b, e) {
+impl Value {
+    /// The stored value (a SHORT or LONG, left-justified in the 4-byte field).
+    fn read(self, order: Order, b: &[u8]) -> Option<u32> {
+        match self.ty {
+            TYPE_SHORT => order.u16(b, self.at).map(u32::from),
+            _ => order.u32(b, self.at),
+        }
+    }
+
+    /// 1 in this entry's own type, width and byte order.
+    fn one(self, order: Order) -> Vec<u8> {
+        match (self.ty, order) {
+            (TYPE_SHORT, Order::Little) => 1u16.to_le_bytes().to_vec(),
+            (TYPE_SHORT, Order::Big) => 1u16.to_be_bytes().to_vec(),
+            (_, Order::Little) => 1u32.to_le_bytes().to_vec(),
+            (_, Order::Big) => 1u32.to_be_bytes().to_vec(),
+        }
+    }
+}
+
+/// The value of the entry at `e` if it is a well-formed Orientation entry:
+/// exactly one SHORT or LONG.
+fn orientation_value(order: Order, b: &[u8], e: usize) -> Option<Value> {
+    if order.u16(b, e)? != TAG_ORIENTATION || order.u32(b, e.checked_add(4)?)? != 1 {
         return None;
     }
-    Some((order, e.checked_add(8)?))
+    let ty = order.u16(b, e.checked_add(2)?)?;
+    matches!(ty, TYPE_SHORT | TYPE_LONG).then_some(Value { at: e.checked_add(8)?, ty })
+}
+
+/// Locates the Orientation value in IFD0.
+///
+/// The **first** Orientation entry wins (like libexif and Photoshop); if that
+/// one is malformed (count ≠ 1, or neither SHORT nor LONG) the tag is ignored,
+/// even when a later duplicate is well formed.
+fn find_entry(b: &[u8]) -> Option<(Order, Value)> {
+    let (order, mut entries) = ifd0_entries(b)?;
+    let e = entries.find(|&e| order.u16(b, e) == Some(TAG_ORIENTATION))?;
+    Some((order, orientation_value(order, b, e)?))
 }
 
 /// The orientation (1–8) recorded in a TIFF-structured block: an EXIF payload
@@ -111,14 +139,15 @@ fn find_entry(b: &[u8]) -> Option<(Order, usize)> {
 /// malformed or out-of-range values give 1.
 pub fn exif_orientation(exif: &[u8]) -> u16 {
     let b = tiff_body(exif);
-    find_entry(b).and_then(|(order, at)| order.u16(b, at)).filter(|v| (1..=8).contains(v)).unwrap_or(1)
+    find_entry(b).and_then(|(order, v)| v.read(order, b)).and_then(|v| u16::try_from(v).ok()).filter(|v| (1..=8).contains(v)).unwrap_or(1)
 }
 
 /// `exif` with its Orientation rewritten to 1, borrowed when there is nothing
 /// to change (no well-formed tag, already 1, or unparseable).
 ///
-/// Only the 2 value bytes of each well-formed Orientation entry change; every
-/// other byte (other tags, their offset-based values, sub-IFDs) is kept as is.
+/// Only the value bytes of each well-formed Orientation entry change, written
+/// as 1 in the entry's existing type and width (SHORT or LONG); every other
+/// byte (other tags, their offset-based values, sub-IFDs) is kept as is.
 /// Well-formed duplicates are all set to 1, so a reader that lets a later
 /// duplicate win cannot rotate the upright pixels either.
 pub fn upright_exif(exif: &[u8]) -> Cow<'_, [u8]> {
@@ -127,17 +156,14 @@ pub fn upright_exif(exif: &[u8]) -> Cow<'_, [u8]> {
     let Some((order, entries)) = ifd0_entries(body) else {
         return Cow::Borrowed(exif);
     };
-    let values: Vec<usize> = entries.filter(|&e| is_orientation(order, body, e)).filter_map(|e| e.checked_add(8)).collect();
-    if values.iter().all(|&at| order.u16(body, at) == Some(1)) {
+    let values: Vec<Value> = entries.filter_map(|e| orientation_value(order, body, e)).collect();
+    if values.iter().all(|v| v.read(order, body) == Some(1)) {
         return Cow::Borrowed(exif);
     }
-    let one = match order {
-        Order::Little => 1u16.to_le_bytes(),
-        Order::Big => 1u16.to_be_bytes(),
-    };
     let mut out = exif.to_vec();
-    for at in values {
-        let slot = prefix.checked_add(at).and_then(|at| out.get_mut(at..at.checked_add(2)?));
+    for v in values {
+        let one = v.one(order);
+        let slot = prefix.checked_add(v.at).and_then(|at| out.get_mut(at..at.checked_add(one.len())?));
         if let Some(slot) = slot {
             slot.copy_from_slice(&one);
         }
